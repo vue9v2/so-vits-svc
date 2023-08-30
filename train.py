@@ -52,8 +52,8 @@ def run(rank, n_gpus, hps):
         utils.check_git_hash(hps.model_dir)
         writer = SummaryWriter(log_dir=hps.model_dir)
         writer_eval = SummaryWriter(log_dir=os.path.join(hps.model_dir, "eval"))
-    
-    # for pytorch on win, backend use gloo    
+
+    # for pytorch on win, backend use gloo
     dist.init_process_group(backend=  'gloo' if os.name == 'nt' else 'nccl', init_method='env://', world_size=n_gpus, rank=rank)
     torch.manual_seed(hps.train.seed)
     torch.cuda.set_device(rank)
@@ -139,7 +139,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
     train_loader, eval_loader = loaders
     if writers is not None:
         writer, writer_eval = writers
-    
+
     half_type = torch.bfloat16 if hps.train.half_type=="bf16" else torch.float16
 
     # train_loader.batch_sampler.set_epoch(epoch)
@@ -162,7 +162,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
             hps.data.sampling_rate,
             hps.data.mel_fmin,
             hps.data.mel_fmax)
-        
+
         with autocast(enabled=hps.train.fp16_run, dtype=half_type):
             y_hat, ids_slice, z_mask, \
             (z, z_p, m_p, logs_p, m_q, logs_q), pred_lf0, norm_lf0, lf0 = net_g(c, f0, uv, spec, g=g, c_lengths=lengths,
@@ -187,13 +187,13 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
             with autocast(enabled=False, dtype=half_type):
                 loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(y_d_hat_r, y_d_hat_g)
                 loss_disc_all = loss_disc
-        
+
         optim_d.zero_grad()
         scaler.scale(loss_disc_all).backward()
         scaler.unscale_(optim_d)
         grad_norm_d = commons.clip_grad_value_(net_d.parameters(), None)
         scaler.step(optim_d)
-        
+
 
         with autocast(enabled=hps.train.fp16_run, dtype=half_type):
             # Generator
@@ -277,6 +277,7 @@ def evaluate(hps, generator, eval_loader, writer_eval):
     generator.eval()
     image_dict = {}
     audio_dict = {}
+    scalar_dict = {}
     with torch.no_grad():
         for batch_idx, items in enumerate(eval_loader):
             c, f0, spec, y, spk, _, uv,volume = items
@@ -311,15 +312,21 @@ def evaluate(hps, generator, eval_loader, writer_eval):
                 f"gen/audio_{batch_idx}": y_hat[0],
                 f"gt/audio_{batch_idx}": y[0]
             })
+
+            loss_mel = F.l1_loss(mel, y_hat_mel) * hps.train.c_mel
+            scalar_dict.update({"eval_loss/g/mel": loss_mel})
+
         image_dict.update({
             "gen/mel": utils.plot_spectrogram_to_numpy(y_hat_mel[0].cpu().numpy()),
             "gt/mel": utils.plot_spectrogram_to_numpy(mel[0].cpu().numpy())
         })
+
     utils.summarize(
         writer=writer_eval,
         global_step=global_step,
         images=image_dict,
         audios=audio_dict,
+        scalars=scalar_dict,
         audio_sampling_rate=hps.data.sampling_rate
     )
     generator.train()
